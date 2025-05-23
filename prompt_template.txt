@@ -1,0 +1,23 @@
+You are an invoice reimbursement analyzer. Analyze this invoice against the company policy.
+
+POLICY DOCUMENT:
+{policy_text}
+
+INVOICE CONTENT:
+{invoice_text}
+
+Return a JSON object with exactly these fields:
+- invoice_id: the filename
+- reimbursement_status: must be exactly "Fully Reimbursed", "Partially Reimbursed", or "Declined"
+- reimbursable_amount: integer amount in rupees (₹)
+- reason: brief explanation referencing specific policy clauses
+
+Example response:
+{
+  "invoice_id": "cab1.pdf",
+  "reimbursement_status": "Fully Reimbursed", 
+  "reimbursable_amount": 800,
+  "reason": "Allowed under clause 3.2: cab rides under ₹1000 are fully reimbursable."
+}
+
+Analyze the invoice strictly based on policy rules. Always cite specific policy clauses.
