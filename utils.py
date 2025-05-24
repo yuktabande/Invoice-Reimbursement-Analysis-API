@@ -1,7 +1,7 @@
+import docx
+import pdfplumber
 import io
 import os
-from docx import Document
-import fitz  # PyMuPDF
 import logging
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ def extract_text_from_docx(docx_content: bytes) -> str:
         docx_stream = io.BytesIO(docx_content)
         
         # Load the document
-        doc = Document(docx_stream)
+        doc = docx.Document(docx_stream)
         
         # Extract text from all paragraphs with structure
         text_content = []
@@ -66,7 +66,7 @@ def extract_text_from_docx(docx_content: bytes) -> str:
 
 def extract_text_from_pdf(pdf_content: bytes) -> str:
     """
-    Extract text from a PDF file using PyMuPDF with enhanced formatting
+    Extract text from PDF content using pdfplumber
     
     Args:
         pdf_content: Bytes content of the PDF file
@@ -75,48 +75,16 @@ def extract_text_from_pdf(pdf_content: bytes) -> str:
         Extracted text as string with preserved structure
     """
     try:
-        # Create a file-like object from bytes
-        pdf_stream = io.BytesIO(pdf_content)
+        text = ""
+        with pdfplumber.open(io.BytesIO(pdf_content)) as pdf:
+            for page in pdf.pages:
+                text += page.extract_text() or ""
         
-        # Open PDF document
-        pdf_document = fitz.open(stream=pdf_stream, filetype="pdf")
-        
-        text_content = []
-        
-        # Extract text from each page with better formatting
-        for page_num in range(pdf_document.page_count):
-            page = pdf_document.load_page(page_num)
+        if not text.strip():
+            logger.warning("No text extracted from PDF - may be scanned/image-based")
+            return ""
             
-            # Get text with layout preservation
-            text = page.get_text("text")
-            
-            # Also try to extract table data if available
-            try:
-                tables = page.find_tables()
-                if tables:
-                    for table in tables:
-                        table_data = table.extract()
-                        for row in table_data:
-                            if row and any(cell for cell in row if cell and str(cell).strip()):
-                                text += "\n" + " | ".join([str(cell).strip() if cell else "" for cell in row])
-            except:
-                pass  # Continue if table extraction fails
-            
-            if text.strip():
-                text_content.append(f"=== PAGE {page_num + 1} ===")
-                text_content.append(text.strip())
-        
-        pdf_document.close()
-        
-        extracted_text = "\n\n".join(text_content)
-        
-        # Clean and structure the text
-        cleaned_text = clean_text(extracted_text)
-        
-        logger.info(f"Extracted {len(cleaned_text)} characters from PDF ({pdf_document.page_count} pages)")
-        
-        return cleaned_text
-        
+        return text.strip()
     except Exception as e:
         logger.error(f"Error extracting text from PDF: {str(e)}")
         return ""
@@ -191,7 +159,7 @@ def validate_file_content(content: bytes, file_type: str) -> bool:
         if file_type.lower() == 'docx':
             # Try to open as DOCX
             docx_stream = io.BytesIO(content)
-            doc = Document(docx_stream)
+            doc = docx.Document(docx_stream)
             return True
             
         elif file_type.lower() == 'pdf':

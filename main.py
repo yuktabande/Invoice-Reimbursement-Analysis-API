@@ -1,15 +1,16 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 import zipfile
 import io
 import os
 import random
-from typing import List, Dict, Any
+from typing import Dict, Any, List
 from utils import extract_text_from_docx, extract_text_from_pdf, load_prompt_template
 import google.generativeai as genai
 from dotenv import load_dotenv
 import json
 import logging
+import asyncio
 
 # Load environment variables
 load_dotenv()
@@ -25,216 +26,103 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Configure Gemini
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
 @app.on_event("startup")
 async def startup_event():
     """Initialize the application on startup"""
     try:
+        # Test API connection
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            logger.error("GEMINI_API_KEY not found in environment variables")
-            logger.info("Please ensure you have set GEMINI_API_KEY in your .env file")
-            raise ValueError("GEMINI_API_KEY is required")
+            raise ValueError("GEMINI_API_KEY not found in environment variables")
         
-        # Test Gemini connection
-        try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            test_response = model.generate_content("Hello, this is a test.")
-            logger.info("Gemini API connection successful")
-        except Exception as gemini_error:
-            logger.error(f"Failed to connect to Gemini API: {str(gemini_error)}")
-            logger.info("Please check your GEMINI_API_KEY and internet connection")
-            
-        logger.info("FastAPI application started successfully")
-        logger.info("Random sampling enabled: Will process max 5 invoices per request")
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')  # Using flash model
+        response = model.generate_content("Test connection")
+        logger.info("Successfully connected to Gemini API")
         
     except Exception as e:
-        logger.error(f"Startup failed: {str(e)}")
+        logger.error(f"Failed to initialize Gemini API: {str(e)}")
         raise
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "service": "invoice-reimbursement-api"}
-
-@app.get("/")
-async def root():
-    """Root endpoint with helpful information"""
-    return {
-        "message": "Invoice Reimbursement Analysis API",
-        "status": "running",
-        "version": "1.0.0",
-        "endpoints": {
-            "POST /analyze-invoices": "Main analysis endpoint - upload policy (.docx) and invoices (.zip)",
-            "GET /upload-form": "Simple HTML form for testing uploads",
-            "GET /test-analysis": "Information about expected request/response format",
-            "GET /docs": "Interactive API documentation (Swagger UI)",
-            "GET /health": "Health check endpoint"
-        },
-        "features": [
-            "Randomly selects 5 invoices from ZIP file for analysis",
-            "Uses Google Gemini for intelligent policy comparison",
-            "Supports .docx policy documents and PDF invoices",
-            "Returns detailed reimbursement decisions with reasoning"
-        ],
-        "next_steps": [
-            "1. Visit /upload-form for a simple upload interface",
-            "2. Or POST to /analyze-invoices with policy_file and invoice_zip",
-            "3. Check /docs for interactive API documentation"
-        ]
-    }
-
-@app.get("/test-analysis")
-async def test_analysis():
-    """Test endpoint to demonstrate the analysis functionality with sample data"""
-    return {
-        "message": "Upload files to /analyze-invoices endpoint",
-        "instructions": {
-            "1": "POST to /analyze-invoices",
-            "2": "Upload policy_file (Policy-Nov2024.pdf.docx)",
-            "3": "Upload invoice_zip (Cab Bills.zip, Meal Invoice.zip, or Travel Bill.zip)",
-            "4": "System will randomly select 5 invoices for analysis"
-        },
-        "expected_response": {
-            "policy_file": "Policy-Nov2024.pdf.docx",
-            "invoice_zip": "Cab Bills.zip",
-            "total_invoices_processed": 5,
-            "randomly_selected": True,
-            "detailed_analysis": [
-                {
-                    "invoice": "cab_receipt_001.pdf",
-                    "status": "Fully Reimbursed",
-                    "amount": 250,
-                    "reason": "Approved under Section 3.2 Transportation Policy. Invoice amount of $250 falls within daily cab limit of $300 for local business travel. All documentation requirements met per Section 2.1."
-                },
-                {
-                    "invoice": "cab_receipt_002.pdf", 
-                    "status": "Partially Reimbursed",
-                    "amount": 500,
-                    "reason": "Invoice total $650 exceeds daily transportation limit of $500 per Section 3.2.1. Reimbursing maximum allowed amount. Receipt format complies with Section 2.1 documentation standards."
-                },
-                {
-                    "invoice": "meal_receipt_001.pdf",
-                    "status": "Declined", 
-                    "amount": 0,
-                    "reason": "Violates Section 4.1 Meal Policy: Alcohol expenses of $75 are non-reimbursable per Section 4.1.3. Location not eligible for meal reimbursement per Section 4.1.1."
-                }
-            ],
-            "executive_summary": {
-                "fully_reimbursed": 1,
-                "partially_reimbursed": 1, 
-                "declined": 1,
-                "total_reimbursable_amount": 750
-            }
-        }
-    }
-
-@app.get("/upload-form")
-async def upload_form():
-    """Simple HTML form for testing file uploads"""
-    html_content = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Invoice Analysis - File Upload</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 40px; }
-            .container { max-width: 600px; margin: 0 auto; }
-            .form-group { margin: 20px 0; }
-            label { display: block; margin-bottom: 5px; font-weight: bold; }
-            input[type="file"] { width: 100%; padding: 10px; border: 2px solid #ddd; }
-            button { background-color: #007bff; color: white; padding: 15px 30px; border: none; cursor: pointer; }
-            button:hover { background-color: #0056b3; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Invoice Reimbursement Analysis</h1>
-            <p>Upload your policy document (.docx) and invoice ZIP file for analysis.</p>
-            
-            <form action="/analyze-invoices" method="post" enctype="multipart/form-data">
-                <div class="form-group">
-                    <label for="policy_file">Policy Document (.docx):</label>
-                    <input type="file" id="policy_file" name="policy_file" accept=".docx" required>
-                </div>
-                
-                <div class="form-group">
-                    <label for="invoice_zip">Invoice ZIP File:</label>
-                    <input type="file" id="invoice_zip" name="invoice_zip" accept=".zip" required>
-                </div>
-                
-                <button type="submit">Analyze Invoices</button>
-            </form>
-            
-            <p><strong>Note:</strong> The system will randomly select up to 5 invoices from your ZIP file for analysis.</p>
-        </div>
-    </body>
-    </html>
-    """
-    
-    from fastapi.responses import HTMLResponse
-    return HTMLResponse(content=html_content, status_code=200)
 
 async def analyze_invoice_with_gemini(policy_text: str, invoice_text: str, invoice_filename: str) -> Dict[str, Any]:
     """Analyze a single invoice against the policy using Gemini"""
-    try:
-        prompt_template = load_prompt_template()
-        formatted_prompt = prompt_template.format(
-            policy_text=policy_text,
-            invoice_text=invoice_text
-        )
-        
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(formatted_prompt)
-        response_text = response.text.strip()
-        
-        # Clean response
-        if response_text.startswith('```json'):
-            response_text = response_text.replace('```json', '').replace('```', '').strip()
-        elif response_text.startswith('```'):
-            response_text = response_text.replace('```', '').strip()
-            
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
         try:
-            result = json.loads(response_text)
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            prompt_template = load_prompt_template()
+            formatted_prompt = prompt_template.format(
+                policy_text=policy_text,
+                invoice_text=invoice_text
+            )
             
-            # Return in expected format
-            validated_result = {
-                "invoice_id": invoice_filename,
-                "reimbursement_status": result.get("reimbursement_status", "Declined"),
-                "reimbursable_amount": int(result.get("reimbursable_amount", 0)),
-                "reason": result.get("reason", "No reason provided")
-            }
+            # Request revalidation in the prompt
+            formatted_prompt += "\nPlease double-check your analysis before responding."
             
-            # Validate status values
-            valid_statuses = ["Fully Reimbursed", "Partially Reimbursed", "Declined"]
-            if validated_result["reimbursement_status"] not in valid_statuses:
-                validated_result["reimbursement_status"] = "Declined"
-                validated_result["reason"] = f"Invalid status returned: {validated_result['reimbursement_status']}"
+            response = model.generate_content(formatted_prompt)
+            response_text = response.text.strip()
             
-            # Ensure non-negative amount
-            if validated_result["reimbursable_amount"] < 0:
-                validated_result["reimbursable_amount"] = 0
-            
-            logger.info(f"Successfully analyzed {invoice_filename}")
-            return validated_result
-            
-        except json.JSONDecodeError:
-            return {
-                "invoice_id": invoice_filename,
-                "reimbursement_status": "Declined",
-                "reimbursable_amount": 0,
-                "reason": "Error parsing analysis response"
-            }
-            
-    except Exception as e:
-        return {
-            "invoice_id": invoice_filename,
-            "reimbursement_status": "Declined",
-            "reimbursable_amount": 0,
-            "reason": f"Analysis error: {str(e)}"
-        }
+            # Clean and validate response
+            try:
+                if response_text.startswith('```json'):
+                    response_text = response_text.replace('```json', '').replace('```', '').strip()
+                elif response_text.startswith('```'):
+                    response_text = response_text.replace('```', '').strip()
+                    
+                result = json.loads(response_text)
+                
+                # Validate required fields and format
+                validated_result = {
+                    "invoice_id": invoice_filename,
+                    "reimbursement_status": result.get("reimbursement_status", "Declined"),
+                    "reimbursable_amount": int(result.get("reimbursable_amount", 0)),
+                    "reason": result.get("reason", "No reason provided")
+                }
+                
+                # Validate status values
+                valid_statuses = ["Fully Reimbursed", "Partially Reimbursed", "Declined"]
+                if validated_result["reimbursement_status"] not in valid_statuses:
+                    raise ValueError(f"Invalid status: {validated_result['reimbursement_status']}")
+                
+                # Ensure reasonable amount
+                if validated_result["reimbursable_amount"] < 0:
+                    raise ValueError("Negative reimbursement amount")
+                
+                # Verify reason includes policy reference
+                if "clause" not in validated_result["reason"].lower():
+                    validated_result["reason"] += " (Based on policy analysis)"
+                
+                logger.info(f"Successfully analyzed {invoice_filename}")
+                return validated_result
+                
+            except (json.JSONDecodeError, ValueError) as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Validation failed, retrying: {str(e)}")
+                    await asyncio.sleep(retry_delay)
+                    continue
+                else:
+                    return {
+                        "invoice_id": invoice_filename,
+                        "reimbursement_status": "Declined",
+                        "reimbursable_amount": 0,
+                        "reason": f"Analysis validation failed: {str(e)}"
+                    }
+                    
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"Analysis attempt {attempt + 1} failed: {str(e)}")
+                await asyncio.sleep(retry_delay)
+            else:
+                raise
+
+    return {
+        "invoice_id": invoice_filename,
+        "reimbursement_status": "Declined",
+        "reimbursable_amount": 0,
+        "reason": "Maximum analysis attempts exceeded"
+    }
 
 async def process_zip_file(zip_content: bytes, max_files: int = None) -> List[Dict[str, Any]]:
     """
@@ -349,6 +237,135 @@ async def analyze_invoices(
         logger.error(f"Analysis failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Root endpoint with basic information"""
+    return """
+    <html>
+        <head>
+            <title>Invoice Reimbursement Analysis API</title>
+        </head>
+        <body>
+            <h1>Invoice Reimbursement Analysis API</h1>
+            <p>Available endpoints:</p>
+            <ul>
+                <li><a href="/docs">API Documentation</a></li>
+                <li><a href="/upload-form">Upload Form</a></li>
+            </ul>
+        </body>
+    </html>
+    """
+
+@app.get("/upload-form", response_class=HTMLResponse)
+async def upload_form():
+    """Simple HTML form for file upload with modern design"""
+    return """
+    <html>
+        <head>
+            <title>Upload Files for Analysis</title>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    line-height: 1.6;
+                    max-width: 800px;
+                    margin: 0 auto;
+                    padding: 2rem;
+                    background-color: #f5f5f7;
+                    color: #1d1d1f;
+                }
+                
+                .container {
+                    background: white;
+                    padding: 2rem;
+                    border-radius: 12px;
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+                }
+                
+                h1 {
+                    font-size: 1.8rem;
+                    font-weight: 500;
+                    margin-bottom: 2rem;
+                    color: #1d1d1f;
+                    text-align: center;
+                }
+                
+                .upload-section {
+                    margin-bottom: 1.5rem;
+                }
+                
+                label {
+                    display: block;
+                    margin-bottom: 0.5rem;
+                    font-weight: 500;
+                    color: #484848;
+                }
+                
+                input[type="file"] {
+                    width: 100%;
+                    padding: 0.5rem;
+                    margin-bottom: 1rem;
+                    border: 2px dashed #e0e0e0;
+                    border-radius: 8px;
+                    background: #fafafa;
+                }
+                
+                input[type="file"]:hover {
+                    border-color: #0071e3;
+                }
+                
+                button {
+                    background-color: #0071e3;
+                    color: white;
+                    padding: 0.8rem 2rem;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 1rem;
+                    cursor: pointer;
+                    width: 100%;
+                    transition: background-color 0.2s;
+                }
+                
+                button:hover {
+                    background-color: #0077ed;
+                }
+                
+                .file-requirements {
+                    font-size: 0.9rem;
+                    color: #666;
+                    margin-top: 0.5rem;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Invoice Analysis</h1>
+                <form action="/analyze-invoices" method="post" enctype="multipart/form-data">
+                    <div class="upload-section">
+                        <label>Policy Document</label>
+                        <input type="file" name="policy_file" accept=".docx" required>
+                        <div class="file-requirements">Accepted format: .docx</div>
+                    </div>
+                    
+                    <div class="upload-section">
+                        <label>Invoice Files</label>
+                        <input type="file" name="invoice_zip" accept=".zip" required>
+                        <div class="file-requirements">Upload a ZIP file containing PDF invoices</div>
+                    </div>
+                    
+                    <button type="submit">Analyze Invoices</button>
+                </form>
+            </div>
+        </body>
+    </html>
+    """
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    
+    uvicorn.run(
+        "main:app",
+        host="127.0.0.1",  # Changed from 0.0.0.0 to localhost
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
